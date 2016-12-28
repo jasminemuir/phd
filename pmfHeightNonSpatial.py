@@ -132,7 +132,7 @@ def main():
             filteredOut = minZ[0]                
     
     print("Updating columns")       
-    updateClassAndHeight(cmdargs, filteredOut, zNull)   
+    #updateClassAndHeight(cmdargs, filteredOut, zNull)   
     
     if cmdargs.createlas:
         outfile = "%s_%s.las" %(cmdargs.infile.split('.')[0], (float(cmdargs.resolution)*100))
@@ -236,13 +236,16 @@ def doMinZ(data, otherargs):
     x = data.input1.getPoints(colNames='X')
     y = data.input1.getPoints(colNames='Y')
     z = data.input1.getPoints(colNames='Z')
+    deviation = data.input1.getPoints(colNames='DEVIATION_RETURN')
+    intensity = data.input1.getPoints(colNames='RHO_APP')
+    returnNo = data.input1.getPoints(colNames='RETURN_NUMBER')
     
-    updateMinZ(x, y, z, otherargs.minZ, otherargs.xMin, 
+    updateMinZ(x, y, z, intensity, otherargs.minZ, otherargs.xMin, 
         otherargs.yMax, otherargs.res, otherargs.zNull)
 
 
 @jit
-def updateMinZ(x, y, z, minzImg, xMin, yMax, res, zNull):
+def updateMinZ(x, y, z, intensity, minzImg, xMin, yMax, res, zNull):
     """
     Called from doProcessing(). 
     
@@ -264,9 +267,10 @@ def updateMinZ(x, y, z, minzImg, xMin, yMax, res, zNull):
             # If this is the first point in this pixel, or if this new point has lower Z than
             # previous, then replace the minZ value
             if minzImg[0, r, c] == zNull or minzImg[0, r, c] > z[i]:
-                minzImg[0, r, c] = z[i]
-                minzImg[1, r, c] = x[i]
-                minzImg[2, r, c] = y[i]
+                if intensity[i] >=-7:
+                    minzImg[0, r, c] = z[i]
+                    minzImg[1, r, c] = x[i]
+                    minzImg[2, r, c] = y[i]
 
 
 def updateClassAndHeight(cmdargs, zArrFiltered, zNull):
@@ -348,6 +352,8 @@ def saveImage(outfile, imgArr, xmin, ymax, res, proj, nullVal):
     """
     Save the given image array as a GDAL raster file. Only saves a single band. 
     """
+    
+    print("Saving image %s" %(outfile))
     
     gdalTypeDict = {numpy.dtype(numpy.float32):gdal.GDT_Float32,
         numpy.dtype(numpy.float64):gdal.GDT_Float64,
@@ -450,127 +456,6 @@ def medianFilter(zArr, zNull):
     
     return zArr
     
-#def createInterpolation(cmdargs, filteredOut, zNull):
-#    """
-#    Create an image array for the interpolated Z value using the filtered Z array
-#    as input. Return a  2-d array of minZ values for each pixel.
-#    """
-#    dataFiles = lidarprocessor.DataFiles()
-#    
-#    # This should be using READ, but because of a bug somewhere, needs UPDATE, so that
-#    # the call in updateClassAndHeight() will also work. 
-#    # See https://bitbucket.org/chchrsc/pylidar/issues/8/cannot-open-same-spdv4-file-twice-in-one
-#    dataFiles.input1 = lidarprocessor.LidarFile(cmdargs.infile, lidarprocessor.UPDATE)  
-#
-#    otherargs = lidarprocessor.OtherArgs()
-#
-#    controls = lidarprocessor.Controls()
-#    controls.setWindowSize(cmdargs.blocksize)
-#    controls.setSpatialProcessing(False)
-#    controls.setOverlap(20)
-#    
-#    # Set up the image array for interpolation, along with appropriate coordinates relating it to 
-#    # the real world (i.e. xMin, yMax, res). 
-#    otherargs.res = cmdargs.resolution
-#    otherargs.zNull = zNull
-#    otherargs.xMin = cmdargs.xmin
-#    otherargs.xMax = cmdargs.xmin
-#    otherargs.yMin = cmdargs.ymin
-#    otherargs.yMax = cmdargs.ymax
-#    otherargs.interp = cmdargs.interp
-#    otherargs.nCols = int(numpy.ceil((cmdargs.xmax - cmdargs.xmin) / otherargs.res))
-#    otherargs.nRows = int(numpy.ceil((cmdargs.ymax - cmdargs.ymin) / otherargs.res))
-#    otherargs.surface = numpy.zeros((otherargs.nRows, otherargs.nCols, 3), dtype=numpy.float32)
-#    otherargs.surface.fill(otherargs.zNull)
-#    lidarprocessor.doProcessing(doInterpolation, dataFiles, otherArgs=otherargs, controls=controls)
-#    #otherargs.surface = runInterp(otherargs.surface, otherargs.interp, otherargs.zNull, otherargs.xMin, otherargs.xMax, otherargs.yMin, otherargs.yMax, otherargs.nRows, otherargs.nCols)    
-#    #print("interp", otherargs.surface.mean()) 
-#    
-#    return otherargs.surface
-#    
-#    
-#def doInterpolation(data, otherargs):
-#    classification = data.input1.getPoints(colNames='CLASSIFICATION')
-#    x = data.input1.getPoints(colNames='X')
-#    y = data.input1.getPoints(colNames='Y')
-#    z = data.input1.getPoints(colNames='Z')
-#    #print("doInterp",z.mean())
-#    #otherargs.surface = numpy.vstack((x,y,z)) 
-#    
-#    
-#    otherargs.surface = updateSurface(x, y, z, classification, otherargs.surface, otherargs.xMin, otherargs.xMax, otherargs.yMin, 
-#        otherargs.yMax, otherargs.res, otherargs.interp, otherargs.zNull)
-#        
-#    #print("surface", (otherargs.surface))
-#    #otherargs.surface = runInterp(x, y, z, otherargs.surface, otherargs.interp, otherargs.zNull, otherargs.xMin, otherargs.xMax, otherargs.yMin, otherargs.yMax, otherargs.nRows, otherargs.nCols)    
-#    #print("interp", otherargs.surface.mean()) 
-#    
-#       
-#@jit
-#def updateSurface(x, y, z, classification, surfaceImg, xMin, xMax, yMin, yMax, res, interp, zNull):
-#    """
-#    Called from doProcessing(). 
-#    
-#    For the current block of points, given by the x, y, z coord arrays, do interpolation of the Z
-#    image array where classification is ground. Note that the surface array starts full of nulls, and 
-#    each time this function is called (for the next block of points), we update whichever pixels are relevant. 
-#    """
-#    numPts = x.shape[0]
-#    #print(numPts)
-#    (nRows, nCols) = (surfaceImg.shape[0], surfaceImg.shape[1])
-#    #print(classification.min(),classification.max())
-#    #print("z", z[classification==2].mean())
-#    
-#    # Loop explicitly over all points. 
-#    for i in range(numPts):
-#        # Calculate the row/column in the image, for the (x, y) coords of the current point
-#        r = int((yMax - y[i]) / res)
-#        c = int((x[i] - xMin) / res)
-#        #if classification[i] == 2:
-#            #print(z[i])
-#
-#        if r >= 0 and r < nRows and c >= 0 and c < nCols and classification[i]==2:            
-#            if surfaceImg[r, c, 2] == zNull or surfaceImg[r, c, 2] > z[i]:               
-#                surfaceImg[r, c, 0] = x[i]
-#                surfaceImg[r, c, 1] = y[i]
-#                surfaceImg[r, c, 2] = z[i]
-#    print(surfaceImg)                      
-#    
-#     
-##def runInterp(surfaceImg, interp, zNull, xMin, xMax, yMin, yMax, nRows, nCols):
-##    """
-##    Do the interpolation using the specified method
-##    """
-##    # Generate a regular grid to interpolate the data.
-##    xi = numpy.linspace(xMin, xMax, nCols)
-##    yi = numpy.linspace(yMin, yMax, nRows)
-##    xi, yi = numpy.meshgrid(xi, yi)
-##    nullMask = (surfaceImg[2]==zNull)
-##    xm = ma.array(surfaceImg[0], mask = nullMask).compressed()
-##    ym = ma.array(surfaceImg[1], mask = nullMask).compressed()
-##    zm = ma.array(surfaceImg[2], mask = nullMask).compressed()
-##    zi = ml.griddata(xm,ym,zm,xi,yi,interp='nn') #interpolation is 'nn' by default (natural neighbour based on delaunay triangulation) but 'linear' is faster (see http://matplotlib.1069221.n5.nabble.com/speeding-up-griddata-td20906.html)
-##    ziflip = np.flipud(zi)
-##    print('zi',ziflip.max())
-##      
-##    
-##    try:
-##        #use try except to allow function to still work when interpolator errors are raised i.e. less 4 points and var. X and Y less 4.
-##        print(pxlCoords[0])
-##        
-##               
-##        surfaceImg = interpolation.interpGrid(xm, ym, zm, pxlCoords, interp)
-##        #print("here", surfaceImg.max())
-##        surfaceImg = numpy.expand_dims(surfaceImg, axis=0).astype(numpy.float32)
-##        overshootMask = numpy.isnan(surfaceImg)
-##        surfaceImg[overshootMask] = zNull
-##        #print(out)
-##    except Exception:
-##        surfaceImg.fill(zNull)
-##        #print('except')
-##    else:
-##        surfaceImg.fill(zNull)    
-##    return(surfaceImg)
 
 if __name__ == "__main__":
     main()
