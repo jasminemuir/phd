@@ -69,6 +69,7 @@ def getCmdargs():
     p.add_argument("--firstfilter", default=None)
     p.add_argument("--pmffilter", action='store_true')
     p.add_argument("--createlas", action='store_true')
+    p.add_argument("--lastonly", action='store_true')
     p.add_argument("--interp", default='pynn',
         help="Interpolation method (default is 'pynn' natural neightbour in pylidar - other option matplotlib 'mann' nat neigh)")
     p.add_argument("--saveinterp", 
@@ -122,6 +123,11 @@ def main():
         goodDataMask = (filtered != zNull)
         filteredOut = pmfjaz.applyPMF(filtered, goodDataMask, cmdargs.resolution, zNull, initWinSize=1, maxWinSize=12, winSizeInc=1, slope=0.3, dh0=0.3, dhmax=5, expWinSizes=False)
 
+        # Remove the extreme high values, on the assumption that they may be non-ground points, which would contaminate the interpolation. 
+        zHighThresh = numpy.percentile(filteredOut[filteredOut!=zNull], 92.0)
+        tooHigh = (filteredOut >= zHighThresh)
+        filteredOut[tooHigh] = zNull
+        
         if cmdargs.savefilteredminz is not None:
             saveImage(cmdargs.savefilteredminz, filteredOut, cmdargs.xmin,  
                 cmdargs.ymax, cmdargs.resolution, info['SPATIAL_REFERENCE'], zNull)
@@ -220,6 +226,7 @@ def createInitialMinzImg(cmdargs, zNull):
     otherargs.zNull = zNull
     otherargs.xMin = cmdargs.xmin
     otherargs.yMax = cmdargs.ymax
+    otherargs.lastonly = cmdargs.lastonly
     nCols = int(numpy.ceil((cmdargs.xmax - cmdargs.xmin) / otherargs.res))
     nRows = int(numpy.ceil((cmdargs.ymax - cmdargs.ymin) / otherargs.res))
     otherargs.minZ = numpy.zeros((3, nRows, nCols), dtype=numpy.float32)
@@ -233,17 +240,42 @@ def createInitialMinzImg(cmdargs, zNull):
     
 
 def doMinZ(data, otherargs):
-    x = data.input1.getPoints(colNames='X')
-    y = data.input1.getPoints(colNames='Y')
-    z = data.input1.getPoints(colNames='Z')
-    deviation = data.input1.getPoints(colNames='DEVIATION_RETURN')
-    intensity = data.input1.getPoints(colNames='RHO_APP')
-    returnNo = data.input1.getPoints(colNames='RETURN_NUMBER')
+    if otherargs.lastonly:
+        ptsbypulse = data.input1.getPointsByPulse(colNames=['X', 'Y', 'Z', 'DEVIATION_RETURN', 'RHO_APP', 'RETURN_NUMBER'])
+        numReturns = data.input1.getPulses(colNames='NUMBER_OF_RETURNS')
+        haveReturns = (numReturns > 0)
+        ptsbypulse_withreturns = ptsbypulse[:, haveReturns]
+        numReturns_withreturns = numReturns[haveReturns]
+        pulseNumber = numpy.arange(ptsbypulse_withreturns.shape[1])
+        lastreturns = ptsbypulse_withreturns[numReturns_withreturns-1, pulseNumber]
+        x = lastreturns['X']
+        y = lastreturns['Y']
+        z = lastreturns['Z']
+        deviation = lastreturns['DEVIATION_RETURN']
+        intensity = lastreturns['RHO_APP']
+        returnNo = lastreturns['RETURN_NUMBER']
+    else:
+        x = data.input1.getPoints(colNames='X')
+        y = data.input1.getPoints(colNames='Y')
+        z = data.input1.getPoints(colNames='Z')
+        deviation = data.input1.getPoints(colNames='DEVIATION_RETURN')
+        intensity = data.input1.getPoints(colNames='RHO_APP')
+        returnNo = data.input1.getPoints(colNames='RETURN_NUMBER')
     
     updateMinZ(x, y, z, intensity, otherargs.minZ, otherargs.xMin, 
         otherargs.yMax, otherargs.res, otherargs.zNull)
 
 
+#@jit
+#def getSingleReturns(ptsbypulse, returnNum):
+#    """
+#    Given an array of points by pulse of shape (numReturns, numPulses), return a 1-d array
+#    of a single return for each pulse, of shape (numPulses,), where the selected return is
+#    given by the returnNum for each pulse
+#    """
+#    for 
+#
+#
 @jit
 def updateMinZ(x, y, z, intensity, minzImg, xMin, yMax, res, zNull):
     """
