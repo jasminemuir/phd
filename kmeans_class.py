@@ -222,6 +222,7 @@ def main():
     redBand = sys.argv[3]
     NIRBand = sys.argv[4]
     noClasses = sys.argv[5]
+    outmosaic = sys.argv[6]
     
     #create NDVI Image
     outfileNDVI = doNDVI(inImage, redBand, NIRBand)
@@ -270,6 +271,8 @@ def main():
             #outfileCLassList.append(outfileISODATA)
             outfileClass = doKMeans(outraster, noClasses)
             outfileCLassList.append(outfileClass)
+            cmd = "rm %s* %s*" %(outraster, outshape)
+            os.system(cmd)
 
             
             
@@ -278,7 +281,11 @@ def main():
                 
     
     #create a mosaic of the outputs
-        
+    cmd = "gdal_merge.py -o %s -of GTiff -co COMPRESS=LZW -co BIGTIFF=IF_SAFER -ot Byte -pct -n 0 -a_nodata 0 %s"  %(outmosaic, " ".join(outfileCLassList))
+    os.system(cmd)
+    
+    cmd = "rm %s" %(" ".join(outfileCLassList))
+    os.system(cmd) 
         
 if __name__ == "__main__":
     main()
