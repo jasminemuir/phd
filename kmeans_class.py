@@ -17,6 +17,7 @@ from __future__ import print_function
 import sys
 import os
 import argparse
+import glob
 
 from osgeo import gdal
 from osgeo import ogr
@@ -38,8 +39,8 @@ def getCmdargs():
     p.add_argument("-s", "--mastershapefile", required=True, help="Shapefile to subset region. Each feature is"+
         "one subset. Need multipart polygons to do multiple areas in a single subset (i.e. region). Needs unique id field")
     p.add_argument("--uid", default='ID', help=("Field with unique ID in shapefile"))
+    p.add_argument("--regionuid", required=True, help=("Region name for output files"))
     p.add_argument("--noClasses", default=8, help=("desired number of output classes in classification image"))
-    p.add_argument("-o","--outmosaic", required=True, help=("name of output mosaic"))           
         
     cmdargs = p.parse_args()
     
@@ -57,14 +58,11 @@ def mksingleshape(shapefile, uid):
     dataSource = driver.Open(shapefile, 0)
     layer = dataSource.GetLayer()
     proj = layer.GetSpatialRef()
-    print("shapefile", proj)
     for feature in layer:
         geom = feature.GetGeometryRef()
         identifier ="_".join(feature.GetField(uid).split(" "))
         outshape = shapebasename + identifier + '.shp'
-        print(outshape)
         outshapeList.append(outshape)
-        print(outshape)
         if not os.path.exists(outshape):
             # Create the output shapefile
             outDataSource = driver.CreateDataSource(outshape)
@@ -103,7 +101,7 @@ def writeOutImg(inputArray, outfile, n, m, c, TLX, TLY, nulVal, proj, dType):
     
     
 def doNDVI(infile, redBand, NIRBand):
-    outfileNDVI = infile.split('.')[0]+'_NDVI_python.tif'
+    outfileNDVI = '%s_NDVI_python.tif' %(infile.split('.')[0])
     if not os.path.exists(outfileNDVI):
         ds = gdal.Open(infile)
         #Find row and column number
@@ -114,10 +112,8 @@ def doNDVI(infile, redBand, NIRBand):
         TLX = geotransform[0]
         TLY = geotransform[3]
         c = geotransform[1] 
-        proj = ds.GetProjection()
-        print(proj)   
-        nulVal = -1    
-        print(outfileNDVI, n, m, c, TLX, TLY,nulVal)
+        proj = ds.GetProjection()  
+        nulVal = 0
         red = np.array(ds.GetRasterBand(int(redBand)).ReadAsArray())
         nir = np.array(ds.GetRasterBand(int(NIRBand)).ReadAsArray())
         ndvi = (nir-red)/(nir+red)
@@ -139,7 +135,7 @@ def doKMeans(infile, numClusters):
     TLX = geotransform[0]
     TLY = geotransform[3]
     c = geotransform[1]
-    nulVal = -1
+    nulVal = 0
     proj = ds.GetProjection() 
 
     imageArray1D = np.column_stack([imageArray.flatten()])
@@ -164,30 +160,16 @@ def doKMeans(infile, numClusters):
 
     del ds
     return outfileClass    
-              
-       
-    
-def main():
 
-    #Set up inputs
-    cmdargs = getCmdargs()
-    print(cmdargs)
-    infile = cmdargs.infile
-    mastershapefile = cmdargs.mastershapefile
-    uid = cmdargs.uid 
-    redBand = cmdargs.redBand
-    NIRBand = cmdargs.NIRBand
-    noClasses = cmdargs.noClasses
-    outmosaic = cmdargs.outmosaic
+
+def doSubset(indexFile, shapefile, noClasses):
+    """
+    Subset the index file using the input shapefile
+    Use gdal_rasterize to create output ndvi/gndvi image for each shapefile
+    """    
     
-    #create NDVI (or GNDVI) Image
-    outfileNDVI = doNDVI(infile, redBand, NIRBand)
-    
-    #create single feature shapefiles from the input shapefile    
-    outshapeList = mksingleshape(mastershapefile, uid)
-    
-    #Check if shapefiles in image extent
-    ds = gdal.Open(infile)
+    #Check if shapefiles in index image extent
+    ds = gdal.Open(indexFile)
     geotransform = ds.GetGeoTransform()
     m = ds.RasterXSize
     n = ds.RasterYSize
@@ -196,52 +178,91 @@ def main():
     c = geotransform[1]
     BRX = float(TLX) + (float(c) * float(m))
     BRY = float(TLY) - (float(c) * float(n))
+    
+    
+    #check if shape in image extent - if it is subset and do isodata classification
+    driver = ogr.GetDriverByName("ESRI Shapefile")
+    dataSource = driver.Open(shapefile, 0)
+    layer = dataSource.GetLayer()
+    extent = layer.GetExtent()
+    xmin = np.floor(float(extent[0])) 
+    ymin = np.floor(float(extent[2])) 
+    xmax = np.ceil(float(extent[1]))
+    ymax = np.ceil(float(extent[3])) 
+    if xmin > TLX and xmax < BRX and ymin > BRY and ymax < TLY:
+        #need to make a fresh copy of the NDVI raster to burn into - now subseting the main raster to each polygon extent
+        subsetRaster = "%s_%s_subset.tif" %(indexFile.split('.')[0],shapefile.split('.')[0])
+        if not os.path.exists(subsetRaster):
+            cmd = "gdal_translate -projwin %s %s %s %s -a_nodata 0 %s %s" %(xmin,ymax,xmax,ymin,indexFile,subsetRaster)
+            os.system(cmd)
+            cmd = "gdal_rasterize -i -burn 0 -l %s %s %s" %(shapefile.split('.')[0], shapefile, subsetRaster)
+            os.system(cmd)
+
+        #do the kmeans classification
+        kmeansRaster = doKMeans(subsetRaster, noClasses)
+    else:
+        print("Shapefile %s not within imagery extent" %shapefile)
+    os.remove(subsetRaster)
+    return kmeansRaster             
+       
+    
+def main():
+
+    #Set up inputs
+    cmdargs = getCmdargs()
+    infile = cmdargs.infile
+    mastershapefile = cmdargs.mastershapefile
+    regionuid = cmdargs.regionuid
+    uid = cmdargs.uid 
+    redBand = cmdargs.redBand
+    NIRBand = cmdargs.NIRBand
+    noClasses = cmdargs.noClasses
+    
+    #create NDVI (or GNDVI) Image - depending on band input as "redBand"
+    outfileNDVI = doNDVI(infile, redBand, NIRBand)
+    
+    #Subset NDVI/GNDVI using all shapefiles (i.e. one regional subset) and perform kmeans classification    
+    kmeansRasterRegion = doSubset(outfileNDVI, mastershapefile, noClasses)
+    
+    #Rename the file to something more sensible
+    if os.path.exists(kmeansRasterRegion):
+        kmeansRasterRegionRename = "%s_%s_KMEANS_REGION.tif" %(infile.split('.')[0], regionuid)
+        cmd = "mv %s %s" %(kmeansRasterRegion, kmeansRasterRegionRename)
+        os.system(cmd)
+        
+        #get rid of the pesky .tif.aux file
+        kmeansRasterRegionAuxFile = glob.glob('%s*' %kmeansRasterRegion.split('.')[0])       
+        for filex in kmeansRasterRegionAuxFile:
+            os.remove(filex)
+        
+        print("Finished creating region raster: %s" %kmeansRasterRegionRename)
+     
+    #create single feature shapefiles for each row in the input shapefile    
+    outshapeList = mksingleshape(mastershapefile, uid)
             
-    #use gdal_rasterize to create output ndvi image for each single feature shapefile
-    outfileCLassList = []
+    #Subset image by each single shapefile and perform kmeans classification
+    kmeansRasterList = []
     for outshape in outshapeList:
-        #check if shape in image extent - if it is subset and do isodata classification
-        driver = ogr.GetDriverByName("ESRI Shapefile")
-        dataSource = driver.Open(outshape, 0)
-        layer = dataSource.GetLayer()
-        extent = layer.GetExtent()
-        xmin = np.floor(float(extent[0])) 
-        ymin = np.floor(float(extent[2])) 
-        xmax = np.ceil(float(extent[1]))
-        ymax = np.ceil(float(extent[3])) 
-        if xmin > TLX and xmax < BRX and ymin > BRY and ymax < TLY:
-            #need to make a fresh copy of the NDVI raster to burn into - now subseting the main raster to each polygon extent
-            outraster = outfileNDVI.split('.')[0] + '_' + outshape.split('.')[0] + '.tif'
-            if not os.path.exists(outraster):
-                cmd = "gdal_translate -projwin %s %s %s %s -a_nodata -1 %s %s" %(xmin,ymax,xmax,ymin,outfileNDVI,outraster)
-                #cmd = "cp %s %s" %(outfileNDVI, outraster)
-                os.system(cmd)
-
-                cmd = "gdal_rasterize -i -burn -1 -l %s %s %s" %(outshape.split('.')[0], outshape, outraster)
-                print
-                os.system(cmd)
-                print('2')
-
-            #do the kmeans classification
-            outfileClass = doKMeans(outraster, noClasses)
-            outfileCLassList.append(outfileClass)
-            cmd = "rm %s* %s*" %(outraster, outshape.split('.')[0])
-            #os.system(cmd)
-
-            
-            
-        else:
-            print("Shapefile %s not within imagery extent" %outshape)
-                
+        kmeansRasterBlock = doSubset(outfileNDVI, outshape, noClasses)
+        kmeansRasterList.append(kmeansRasterBlock)                    
     
     #create a mosaic of the outputs
-    cmd = "gdal_merge.py -o %s -of GTiff -co COMPRESS=LZW -co BIGTIFF=IF_SAFER -ot Byte -pct -n 0 -a_nodata 0 %s"  %(outmosaic, " ".join(outfileCLassList))
+    outmosaic = "%s_%s_KMEANS_BLOCKS.tif" %(infile.split('.')[0], regionuid)
+    cmd = "gdal_merge.py -o %s -of GTiff -co COMPRESS=LZW -co BIGTIFF=IF_SAFER -ot Byte -pct -n 0 -a_nodata 0 %s"  %(outmosaic, " ".join(kmeansRasterList))
     os.system(cmd)
     if os.path.exists(outmosaic):    
-        print("finished creating mosaic %s" %outmosaic)
-    
-    cmd = "rm %s" %(" ".join(outfileCLassList))
-    #os.system(cmd) 
+        print("Finished creating block mosaic: %s" %outmosaic)
+        
+        #Tidy up - delete individual block kmeans files and shapefiles
+        for kmeansFile in kmeansRasterList:
+            kmeansFileAll = glob.glob('%s*' %kmeansFile.split('.')[0])
+            for kmeansFileAllFile in kmeansFileAll:
+                os.remove(kmeansFileAllFile)
+        for outshape in outshapeList:
+            outshapeAll = glob.glob('%s*' %outshape.split('.')[0])
+            for outshapeAllFile in outshapeAll:
+                os.remove(outshapeAllFile)    
+
         
 if __name__ == "__main__":
     main()
