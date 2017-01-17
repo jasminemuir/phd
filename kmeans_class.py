@@ -1,16 +1,10 @@
 #!/usr/bin/env python
 """
-Script for creation of isodata image from input image
+Script for creation of kmeans classification image from input image
 
-Takes an input single band image and outputs the isodata classification of the computed NDVI image
-based on subseting from an input shapefile defining subregion extent (one polygon per sub region) - polygons
-can be muti-part features.
-
-Isodata classification is computed using the open source pyradar implementation:
-http://pyradar-tools.readthedocs.io/en/latest/_modules/pyradar/classifiers/isodata.html
-http://pyradar-tools.readthedocs.io/en/latest/examples.html#example-of-isodata
-
-Isodata parameters currently hard-coded in this script - can modify to add to command line.
+Takes an input multi-band image and outputs the kmeans classification of the computed NDVI/GNDVI image
+based on subseting from an input shapefile defining subregion extent (one polygon per sub region).
+Subseting is completed based on each feature/row. Th can be muti-part features.
 
 
 Written by: Jasmine Muir at University of New England
@@ -22,28 +16,51 @@ Example: ./ndvi_isodata.py S15_8March2015_MidNSW_ortho_TOA_LS boundaries_subset_
 from __future__ import print_function
 import sys
 import os
+import argparse
 
 from osgeo import gdal
 from osgeo import ogr
 import numpy as np
 import numpy.ma as ma
-import isodata
 from rios import cuiprogress
 from rios import calcstats
 from sklearn.cluster import KMeans
 
-def mksingleshape(shapefile):
-    shapebasename = "_".join(shapefile.split('.')[0].split(" "))
+
+def getCmdargs():
+    """
+    Get commandline arguments
+    """
+    p = argparse.ArgumentParser()
+    p.add_argument("-i", "--infile", required=True, help=("Input multispectral image"))
+    p.add_argument("--redBand", required=True, help=("Red band (or Green for GNVI) for NDVI calculation"))
+    p.add_argument("--NIRBand", required=True, help=("NIR band for NDVI calculation"))
+    p.add_argument("-s", "--mastershapefile", required=True, help="Shapefile to subset region. Each feature is"+
+        "one subset. Need multipart polygons to do multiple areas in a single subset (i.e. region). Needs unique id field")
+    p.add_argument("--uid", default='ID', help=("Field with unique ID in shapefile"))
+    p.add_argument("--noClasses", default=8, help=("desired number of output classes in classification image"))
+    p.add_argument("-o","--outmosaic", required=True, help=("name of output mosaic"))           
+        
+    cmdargs = p.parse_args()
     
-    #Takes an input shapefile and creates a new shapefile for each feature
+    return cmdargs
+
+
+def mksingleshape(shapefile, uid):
+    """
+    Takes an input shapefile and creates a new shapefile for each feature
+    """
+    
+    shapebasename = "_".join(shapefile.split('.')[0].split(" "))
     outshapeList = []
     driver = ogr.GetDriverByName("ESRI Shapefile")
     dataSource = driver.Open(shapefile, 0)
     layer = dataSource.GetLayer()
     proj = layer.GetSpatialRef()
+    print("shapefile", proj)
     for feature in layer:
         geom = feature.GetGeometryRef()
-        identifier ="_".join(feature.GetField("ID").split(" "))
+        identifier ="_".join(feature.GetField(uid).split(" "))
         outshape = shapebasename + identifier + '.shp'
         print(outshape)
         outshapeList.append(outshape)
@@ -57,6 +74,7 @@ def mksingleshape(shapefile):
     dataSource.Destroy()
           
     return outshapeList
+    
 
 def createColorTable():   
     ct = gdal.ColorTable()
@@ -84,10 +102,10 @@ def writeOutImg(inputArray, outfile, n, m, c, TLX, TLY, nulVal, proj, dType):
     del ds
     
     
-def doNDVI(inImage, redBand, NIRBand):
-    outfileNDVI = inImage.split('.')[0]+'_NDVI_python.tif'
+def doNDVI(infile, redBand, NIRBand):
+    outfileNDVI = infile.split('.')[0]+'_NDVI_python.tif'
     if not os.path.exists(outfileNDVI):
-        ds = gdal.Open(inImage)
+        ds = gdal.Open(infile)
         #Find row and column number
         m = ds.RasterXSize
         n = ds.RasterYSize
@@ -108,8 +126,8 @@ def doNDVI(inImage, redBand, NIRBand):
         
     return outfileNDVI
     
-def doKMeans(inImage, numClusters):
-    ds = gdal.Open(inImage)
+def doKMeans(infile, numClusters):
+    ds = gdal.Open(infile)
     
     imageArray = np.array(ds.GetRasterBand(int(1)).ReadAsArray())
     
@@ -140,98 +158,36 @@ def doKMeans(inImage, numClusters):
   
     classImageArray = out.reshape(imageArray.shape)
     
-    outfileClass = "%s_kmeans.tif" %inImage.split('.')[0]
+    outfileClass = "%s_kmeans.tif" %infile.split('.')[0]
             
     writeOutImg(classImageArray, outfileClass, m, n, c, TLX, TLY, nulVal, proj, gdal.GDT_Byte)
 
     del ds
     return outfileClass    
-    
-    
-def doIsodata(inImage, noClasses):
-    """
-    #Default values from pyradar/isodata.py
-    # number of clusters desired
-    K =  5
-    # maximum number of iterations
-    I = 100
-    # maximum of number of pairs of clusters which can be merged
-    P =  4
-    # threshold value for  minimum number of samples in each cluster (discarding clusters)
-    THETA_M = 10
-    # threshold value for standard deviation (for split)
-    THETA_S = 1    
-    # threshold value for pairwise distances (for merge)
-    THETA_C = 20
-    # percentage of change in clusters between each iteration (to stop algorithm)
-    THETA_O = 0.05
-    """
-    outfileISODATA = inImage.split('.')[0]+'_ISODATA.tif'
-    if not os.path.exists(outfileISODATA):
-        ds = gdal.Open(inImage)
-        #Find row and column number
-        m = ds.RasterXSize
-        n = ds.RasterYSize
-
-        #Find input image origin (TLX,TLY) and pixel size
-        geotransform = ds.GetGeoTransform()
-        TLX = geotransform[0]
-        TLY = geotransform[3]
-        c = geotransform[1]
-        nulVal = -1
-        proj = ds.GetProjection()      
-        print(outfileISODATA, n, m, c, TLX, TLY,nulVal)
-    
-        #set isodata parameters
-        #Parameters set same as defult in ENVI - except number of iterations (K) and number of classes (I)
-        parameters = {"K": int(noClasses) , "I" : 100, "P" : 2 , "THETA_M" : 1, "THETA_S" : 1, "THETA_C" : 5, "THETA_O" : 0.05}
-        #print('prog',parameters)
-        #sys.exit()
-
-        imgarray = np.array(ds.GetRasterBand(1).ReadAsArray())
-        mask = imgarray<=0
-        imgarraymask = ma.array(imgarray, mask = mask)
-        #print(imgarraymask)
-        sd = np.std(imgarraymask)
-        minimum = np.amin(imgarraymask)
-        maximum = np.amax(imgarraymask)
-        print('sd',sd, minimum, maximum, imgarray.shape)
-        #print(imgarraymask)
-        (isoarray,k) = isodata.isodata_classification(imgarraymask, parameters=parameters)
-        #sys.exit()
-        #if for some reason only 1 class found - try rerunning with only 3 classes
-        if k == 3:
-            parameters = {"K": 4 , "I" : 3, "P" : 2, "THETA_M" : 1, "THETA_S" : 0.01, "THETA_C" : 5, "THETA_O" : 0.05}
-            (isoarray,k) = isodata.isodata_classification(imgarraymask.data, parameters=parameters)
-            print(k)
-        if k == 2:
-            sys.exit("Only 2 classes - something weird going on")    
-        print(isoarray.shape)
-        #sys.exit()
-        writeOutImg(isoarray, outfileISODATA, m, n, c, TLX, TLY, nulVal, proj, gdal.GDT_Byte)
-        del ds
-        del imgarray
-        del isoarray
-        
-    return outfileISODATA        
+              
        
     
 def main():
-    inImage = sys.argv[1]
-    masterShapefile = sys.argv[2] 
-    redBand = sys.argv[3]
-    NIRBand = sys.argv[4]
-    noClasses = sys.argv[5]
-    outmosaic = sys.argv[6]
+
+    #Set up inputs
+    cmdargs = getCmdargs()
+    print(cmdargs)
+    infile = cmdargs.infile
+    mastershapefile = cmdargs.mastershapefile
+    uid = cmdargs.uid 
+    redBand = cmdargs.redBand
+    NIRBand = cmdargs.NIRBand
+    noClasses = cmdargs.noClasses
+    outmosaic = cmdargs.outmosaic
     
-    #create NDVI Image
-    outfileNDVI = doNDVI(inImage, redBand, NIRBand)
+    #create NDVI (or GNDVI) Image
+    outfileNDVI = doNDVI(infile, redBand, NIRBand)
     
     #create single feature shapefiles from the input shapefile    
-    outshapeList = mksingleshape(masterShapefile)
+    outshapeList = mksingleshape(mastershapefile, uid)
     
     #Check if shapefiles in image extent
-    ds = gdal.Open(inImage)
+    ds = gdal.Open(infile)
     geotransform = ds.GetGeoTransform()
     m = ds.RasterXSize
     n = ds.RasterYSize
@@ -266,13 +222,11 @@ def main():
                 os.system(cmd)
                 print('2')
 
-            #then do an isodata classification on each image
-            #outfileISODATA = doIsodata(outraster, noClasses)
-            #outfileCLassList.append(outfileISODATA)
+            #do the kmeans classification
             outfileClass = doKMeans(outraster, noClasses)
             outfileCLassList.append(outfileClass)
-            cmd = "rm %s* %s*" %(outraster, outshape)
-            os.system(cmd)
+            cmd = "rm %s* %s*" %(outraster, outshape.split('.')[0])
+            #os.system(cmd)
 
             
             
@@ -283,9 +237,11 @@ def main():
     #create a mosaic of the outputs
     cmd = "gdal_merge.py -o %s -of GTiff -co COMPRESS=LZW -co BIGTIFF=IF_SAFER -ot Byte -pct -n 0 -a_nodata 0 %s"  %(outmosaic, " ".join(outfileCLassList))
     os.system(cmd)
+    if os.path.exists(outmosaic):    
+        print("finished creating mosaic %s" %outmosaic)
     
     cmd = "rm %s" %(" ".join(outfileCLassList))
-    os.system(cmd) 
+    #os.system(cmd) 
         
 if __name__ == "__main__":
     main()
