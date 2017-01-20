@@ -25,7 +25,9 @@ import numpy as np
 import numpy.ma as ma
 from rios import cuiprogress
 from rios import calcstats
+from rios import rat
 from sklearn.cluster import KMeans
+from scipy.ndimage import median_filter
 
 
 def getCmdargs():
@@ -41,6 +43,7 @@ def getCmdargs():
     p.add_argument("--uid", default='ID', help=("Field with unique ID in shapefile"))
     p.add_argument("--regionuid", required=True, help=("Region name for output files"))
     p.add_argument("--noClasses", default=8, help=("desired number of output classes in classification image"))
+    p.add_argument("--median", default=0, type=int, help=("size of median filter window to apply to output classifications"))
         
     cmdargs = p.parse_args()
     
@@ -72,13 +75,7 @@ def mksingleshape(shapefile, uid):
     dataSource.Destroy()
           
     return outshapeList
-    
-
-def createColorTable():   
-    ct = gdal.ColorTable()
-    for i in range(256):
-        ct.SetColorEntry( i, (255, 255 - i, i, 255) )
-    return ct    
+      
     
 
 def writeOutImg(inputArray, outfile, n, m, c, TLX, TLY, nulVal, proj, dType):
@@ -88,9 +85,6 @@ def writeOutImg(inputArray, outfile, n, m, c, TLX, TLY, nulVal, proj, dType):
     ds = drvr.Create(outfile, n, m, nBands, dType, ['COMPRESS=LZW'])
     band = ds.GetRasterBand(1)
     
-  #  if dType is gdal.GDT_Byte:
- #       ct = createColorTable()
-#        band.SetRasterColorTable(ct)
     
     band.WriteArray(inputArray)
     ds.SetGeoTransform((TLX, c, 0, TLY, 0, -c))
@@ -100,8 +94,7 @@ def writeOutImg(inputArray, outfile, n, m, c, TLX, TLY, nulVal, proj, dType):
     del ds
     
     
-def doNDVI(infile, redBand, NIRBand):
-    outfileNDVI = '%s_NDVI_python.tif' %(infile.split('.')[0])
+def doNDVI(infile, redBand, NIRBand, outfileNDVI):
     if not os.path.exists(outfileNDVI):
         ds = gdal.Open(infile)
         #Find row and column number
@@ -137,7 +130,7 @@ def doKMeans(infile, numClusters):
     c = geotransform[1]
     nulVal = 0
     proj = ds.GetProjection() 
-
+    print("Doing kmeans %s" %infile)
     imageArray1D = np.column_stack([imageArray.flatten()])
     k_means = KMeans(n_clusters=int(numClusters)+1)    #Add 1 to number of clusters to account for no data class
     
@@ -193,6 +186,7 @@ def doSubset(indexFile, shapefile, noClasses):
         #need to make a fresh copy of the NDVI raster to burn into - now subseting the main raster to each polygon extent
         subsetRaster = "%s_%s_subset.tif" %(indexFile.split('.')[0],shapefile.split('.')[0])
         if not os.path.exists(subsetRaster):
+            print("Doing subset %s" %(subsetRaster))
             cmd = "gdal_translate -projwin %s %s %s %s -a_nodata 0 %s %s" %(xmin,ymax,xmax,ymin,indexFile,subsetRaster)
             os.system(cmd)
             cmd = "gdal_rasterize -i -burn 0 -l %s %s %s" %(shapefile.split('.')[0], shapefile, subsetRaster)
@@ -205,6 +199,47 @@ def doSubset(indexFile, shapefile, noClasses):
     os.remove(subsetRaster)
     return kmeansRaster             
        
+def creatColorTable():
+    
+    colorArray = np.array([
+        [0,240,240,240,0],
+        [1,255,0,0,0],
+        [2,255,165,0,1],
+        [3,255,255,0,1],
+        [4,0,255,0,1],
+        [5,0,255,255,1],
+        [6,0,0,255,1],
+        [7,176,48,96,1],
+        [8,255,0,255,1]]
+    )            
+
+    return colorArray
+    
+def medianFilter(infile, nullVal, winsize, outfile):  
+    
+    
+    ds = gdal.Open(infile)
+    
+    imageArray = np.array(ds.GetRasterBand(int(1)).ReadAsArray())
+    
+    m = ds.RasterXSize
+    n = ds.RasterYSize
+
+    #Find input image origin (TLX,TLY) and pixel size
+    geotransform = ds.GetGeoTransform()
+    TLX = geotransform[0]
+    TLY = geotransform[3]
+    c = geotransform[1]
+    nulVal = 0
+    proj = ds.GetProjection() 
+    
+    medianFilterArray = median_filter(imageArray, size=winsize)
+    writeOutImg(medianFilterArray, outfile, m, n, c, TLX, TLY, nulVal, proj, gdal.GDT_Byte)
+    #Create color table
+    colorArray = creatColorTable()
+    rat.setColorTable(outfile,colorArray)
+    
+                    
     
 def main():
 
@@ -217,11 +252,23 @@ def main():
     redBand = cmdargs.redBand
     NIRBand = cmdargs.NIRBand
     noClasses = cmdargs.noClasses
+    median = cmdargs.median
+    
+    #Check the infile and shapefile exist
+    if not os.path.exists(infile):
+        sys.exit("Specified infile %s does not exisit in local directory" %infile)
+    elif not os.path.exists(mastershapefile):    
+        sys.exit("Specified shapefile %s does not exisit in local directory" %mastershapefile)
+    
     
     #create NDVI (or GNDVI) Image - depending on band input as "redBand"
-    outfileNDVI = doNDVI(infile, redBand, NIRBand)
+    outfileNDVI = '%s_NDVI_python.tif' %(infile.split('.')[0])
+    if not os.path.exists(outfileNDVI):
+        print("Doing NDVI %s" %(outfileNDVI))
+        outfileNDVI = doNDVI(infile, redBand, NIRBand, outfileNDVI)
     
     #Subset NDVI/GNDVI using all shapefiles (i.e. one regional subset) and perform kmeans classification    
+    print("Doing region kmeans")
     kmeansRasterRegion = doSubset(outfileNDVI, mastershapefile, noClasses)
     
     #Rename the file to something more sensible
@@ -229,6 +276,10 @@ def main():
         kmeansRasterRegionRename = "%s_%s_KMEANS_REGION.tif" %(infile.split('.')[0], regionuid)
         cmd = "mv %s %s" %(kmeansRasterRegion, kmeansRasterRegionRename)
         os.system(cmd)
+        
+        #Create color table
+        colorArray = creatColorTable()
+        rat.setColorTable(kmeansRasterRegionRename,colorArray)
         
         #get rid of the pesky .tif.aux file
         kmeansRasterRegionAuxFile = glob.glob('%s*' %kmeansRasterRegion.split('.')[0])       
@@ -248,20 +299,38 @@ def main():
     
     #create a mosaic of the outputs
     outmosaic = "%s_%s_KMEANS_BLOCKS.tif" %(infile.split('.')[0], regionuid)
-    cmd = "gdal_merge.py -o %s -of GTiff -co COMPRESS=LZW -co BIGTIFF=IF_SAFER -ot Byte -pct -n 0 -a_nodata 0 %s"  %(outmosaic, " ".join(kmeansRasterList))
-    os.system(cmd)
+    if not os.path.exists(outmosaic):
+        cmd = "gdal_merge.py -o %s -of GTiff -co COMPRESS=LZW -co BIGTIFF=IF_SAFER -ot Byte -pct -n 0 -a_nodata 0 %s"  %(outmosaic, " ".join(kmeansRasterList))
+        os.system(cmd)   
+        #Create color table
+        colorArray = creatColorTable()
+        rat.setColorTable(outmosaic,colorArray)
+    
     if os.path.exists(outmosaic):    
         print("Finished creating block mosaic: %s" %outmosaic)
         
-        #Tidy up - delete individual block kmeans files and shapefiles
-        for kmeansFile in kmeansRasterList:
-            kmeansFileAll = glob.glob('%s*' %kmeansFile.split('.')[0])
-            for kmeansFileAllFile in kmeansFileAll:
-                os.remove(kmeansFileAllFile)
-        for outshape in outshapeList:
-            outshapeAll = glob.glob('%s*' %outshape.split('.')[0])
-            for outshapeAllFile in outshapeAll:
-                os.remove(outshapeAllFile)    
+        try:
+            #Tidy up - delete individual block kmeans files and shapefiles
+            for kmeansFile in kmeansRasterList:
+                kmeansFileAll = glob.glob('%s*' %kmeansFile.split('.')[0])
+                for kmeansFileAllFile in kmeansFileAll:
+                    os.remove(kmeansFileAllFile)
+            for outshape in outshapeList:
+                outshapeAll = glob.glob('%s*' %outshape.split('.')[0])
+                for outshapeAllFile in outshapeAll:
+                    os.remove(outshapeAllFile)
+        except:
+            print("Can't remove all files for cleanup - they are open in another program")            
+
+    #Apply median filter for imagery with small pixel size i.e. Worldview
+    if median > 0:
+        kmeansRasterRegionRenameMedian = "%s_MEDIAN_TEST%s.tif" %(kmeansRasterRegionRename.split('.')[0], median)
+        outmosaicMedian = "%s_MEDIAN_TEST%s.tif" %(outmosaic.split('.')[0], median)
+        if not os.path.exists(kmeansRasterRegionRenameMedian):
+            medianFilter(kmeansRasterRegionRename, 0, median, kmeansRasterRegionRenameMedian) 
+        if not os.path.exists(outmosaicMedian):
+            medianFilter(outmosaic, 0, median, outmosaicMedian)
+                       
 
         
 if __name__ == "__main__":
